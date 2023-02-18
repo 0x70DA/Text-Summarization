@@ -1,0 +1,22 @@
+{
+    "model_name": "t5-small",
+    "input_column": "dialogue",
+    "target_column": "summary",
+    "dataset_name": "samsum",
+    "preprocessing_num_workers": 2,
+    "pad_to_max_length": true,
+    "max_train_samples": 1000,
+    "max_eval_samples": 1000,
+    "num_beams": 2,
+    "source_prefix": "summarize: ",
+    "output_dir": "./out",
+    "resume_from_checkpoint": true,
+    "do_eval": true,
+    "per_device_train_batch_size": 8,
+    "per_device_eval_batch_size": 16,
+    "num_train_epochs": 5,
+    "push_to_hub_model_id": "test333",
+    "push_to_hub": true,
+    "push_to_hub_token": "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",
+    "xla": true
+}
