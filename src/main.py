@@ -31,6 +31,12 @@ from transformers.trainer_utils import get_last_checkpoint
 logger = logging.getLogger(__name__)
 nltk.download("punkt")
 
+print(f"Number of available GPUs: {len(tf.config.list_physical_devices('GPU'))}")
+
+if len(tf.config.list_physical_devices("GPU")) == 0:
+    sys.exit()
+
+
 
 def main():
     # region Argument parsing
