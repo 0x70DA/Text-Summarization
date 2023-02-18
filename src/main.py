@@ -113,14 +113,6 @@ def main():
     prefix = data_args.source_prefix if data_args.source_prefix is not None else ""
     # endregion
 
-    # region Load model
-    model = TFAutoModelForSeq2SeqLM.from_pretrained(
-        model_args.model_name_or_path,
-        cache_dir=model_args.cache_dir,
-        use_auth_token=model_args.use_auth_token
-    )
-    # endregion
-
     # region Data preprocessing
     column_names = raw_datasets["train"].column_names
     input_column = data_args.input_column
@@ -200,63 +192,16 @@ def main():
 
     # endregion
 
-    # region Compute metric
-    rouge_score = evaluate.load("rougs")
-
-    def compute_metric(
-        tokenized_dataset=eval_dataset,
-        metric=rouge_score,
-        model=model,
-        batch_size=8,
-    ):
-    
-        generation_data_collator = DataCollatorForSeq2Seq(
-            tokenizer=tokenizer, 
-            model=model, 
-            return_tensors="tf", 
-            pad_to_multiple_of=256
-        )
-
-        tf_generate_dataset = model.prepare_tf_dataset(
-            tokenized_dataset,
-            collate_fn=generation_data_collator,
-            shuffle=False,
-            batch_size=batch_size,
-            drop_remainder=True,
-        )
-
-        @tf.function(jit_compile=True)
-        def generate_with_xla(batch):
-            return model.generate(
-                input_ids=batch["input_ids"],
-                attention_mask=batch["attention_mask"],
-                max_new_tokens=32,
-            )
-
-        all_preds = []
-        all_labels = []
-        for batch, labels in tqdm(tf_generate_dataset):
-            predictions = generate_with_xla(batch)
-            decoded_preds = tokenizer.batch_decode(predictions, skip_special_tokens=True)
-            labels = labels.numpy()
-            labels = np.where(labels != -100, labels, tokenizer.pad_token_id)
-            decoded_labels = tokenizer.batch_decode(
-                labels, 
-                skip_special_tokens=True,
-                clean_up_tokenization_spaces=True,
-            )
-            decoded_preds, decoded_labels = postprocess_text(decoded_preds, decoded_labels)
-            all_preds.extend(decoded_preds)
-            all_labels.extend(decoded_labels)
-        
-        return metric.compute(
-            predictions=all_preds, 
-            references=all_labels, 
-            use_stemmer=True
-        )
-    # endregion
 
     with training_args.strategy.scope():
+        # region Load model
+        model = TFAutoModelForSeq2SeqLM.from_pretrained(
+            model_args.model_name_or_path,
+            cache_dir=model_args.cache_dir,
+            use_auth_token=model_args.use_auth_token
+        )
+        # endregion
+
         # region Prepare TF datasets
         label_pad_token_id = -100 if data_args.ignore_pad_token_for_loss else tokenizer.pad_token_id
         data_collator = DataCollatorForSeq2Seq(
@@ -287,6 +232,62 @@ def main():
             batch_size=total_eval_batch_size,
             shuffle=False,
         ).with_options(dataset_options)
+        # endregion
+
+        # region Compute metric
+        rouge_score = evaluate.load("rouge")
+
+        def compute_metric(
+            tokenized_dataset=eval_dataset,
+            metric=rouge_score,
+            model=model,
+            batch_size=8,
+        ):
+        
+            generation_data_collator = DataCollatorForSeq2Seq(
+                tokenizer=tokenizer, 
+                model=model, 
+                return_tensors="tf", 
+                pad_to_multiple_of=256
+            )
+
+            tf_generate_dataset = model.prepare_tf_dataset(
+                tokenized_dataset,
+                collate_fn=generation_data_collator,
+                shuffle=False,
+                batch_size=batch_size,
+                drop_remainder=True,
+            )
+
+            @tf.function(jit_compile=True)
+            def generate_with_xla(batch):
+                return model.generate(
+                    input_ids=batch["input_ids"],
+                    attention_mask=batch["attention_mask"],
+                    max_new_tokens=32,
+                )
+
+            all_preds = []
+            all_labels = []
+            for batch, labels in tqdm(tf_generate_dataset):
+                predictions = generate_with_xla(batch)
+                decoded_preds = tokenizer.batch_decode(predictions, skip_special_tokens=True)
+                labels = labels.numpy()
+                labels = np.where(labels != -100, labels, tokenizer.pad_token_id)
+                decoded_labels = tokenizer.batch_decode(
+                    labels, 
+                    skip_special_tokens=True,
+                    clean_up_tokenization_spaces=True,
+                )
+                decoded_preds, decoded_labels = postprocess_text(decoded_preds, decoded_labels)
+                all_preds.extend(decoded_preds)
+                all_labels.extend(decoded_labels)
+            
+            return metric.compute(
+                predictions=all_preds, 
+                references=all_labels, 
+                use_stemmer=True
+            )
         # endregion
 
         # region Optimizer, loss and LR scheduling
@@ -324,9 +325,7 @@ def main():
                     push_to_hub_model_id = f"{model_name}-finetuned-summarization"
             callbacks.append(PushToHubCallback(
                 output_dir=training_args.output_dir,
-                model_id=push_to_hub_model_id,
-                organization=training_args.push_to_hub_organization,
-                token=training_args.push_to_hub_token,
+                hub_model_id=push_to_hub_model_id,
                 tokenizer=tokenizer,
             ))
         
@@ -334,7 +333,9 @@ def main():
 
         # region Training
         model.compile(optimizer=optimizer, jit_compile=training_args.xla)
-        tf.keras.mixed_precision.set_global_policy("mixed_float16")
+        if training_args.fp16:
+            tf.keras.mixed_precision.set_global_policy("mixed_float16")
+            
         eval_metrics = None
 
         logger.info("***** Running training *****")

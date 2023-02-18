@@ -3,7 +3,7 @@ from dataclasses import dataclass, field
 from typing import Optional, Tuple
 from transformers.utils import cached_property, requires_backends, is_tf_available
 
-logger = logging.get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 if is_tf_available():
     import tensorflow as tf
@@ -268,10 +268,6 @@ class TFTrainingArguments:
         logger.info("Tensorflow: setting up strategy")
 
         gpus = tf.config.list_physical_devices("GPU")
-
-        # Set to float16 at first
-        if self.fp16:
-            tf.keras.mixed_precision.set_global_policy("mixed_float16")
 
         if self.no_cuda:
             strategy = tf.distribute.OneDeviceStrategy(device="/cpu:0")
