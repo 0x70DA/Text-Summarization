@@ -57,7 +57,8 @@ def main():
     transformers.utils.logging.set_verbosity(logging.INFO)
 
     # Login to HuggingFace hub
-    huggingface_hub.login(training_args.hub_token)
+    if training_args.push_to_hub_token is not None:
+        huggingface_hub.login(training_args.push_to_hub_token)
 
     logger.info(f"Training/evaluation parameters {training_args}")
     # endregion
@@ -315,7 +316,7 @@ def main():
 
         callbacks = []
                 
-        if training_args.push_to_hub:
+        if training_args.push_to_hub and training_args.push_to_hub_token is not None:
             push_to_hub_model_id = training_args.push_to_hub_model_id
             model_name = model_args.model_name_or_path.split("/")[-1]
             if not push_to_hub_model_id:
