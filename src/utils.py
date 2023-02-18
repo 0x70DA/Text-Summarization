@@ -1,5 +1,12 @@
+import logging
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Tuple
+from transformers.utils import cached_property, requires_backends, is_tf_available
+
+logger = logging.get_logger(__name__)
+
+if is_tf_available():
+    import tensorflow as tf
 
 @dataclass
 class ModelArguments:
@@ -7,7 +14,7 @@ class ModelArguments:
     Arguments pertaining to which model/config/tokenizer we are going to fine-tune from.
     """
 
-    model_name: str = field(
+    model_name_or_path: str = field(
         metadata={"help": "Path to pretrained model or model identifier from huggingface.co/models"}
     )
     config_name: Optional[str] = field(
@@ -178,3 +185,121 @@ class DataTrainingArguments:
                 assert extension in ["csv", "json"], "`validation_file` should be a csv or a json file."
         if self.val_max_target_length is None:
             self.val_max_target_length = self.max_target_length
+
+@dataclass
+class TFTrainingArguments:
+
+    output_dir: str = field(
+        metadata={"help": "The output directory where the model predictions and checkpoints will be written."},
+    )
+    overwrite_output_dir: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Overwrite the content of the output directory. "
+                "Use this to continue training if output_dir points to a checkpoint directory."
+            )
+        },
+    )
+
+    do_train: bool = field(default=False, metadata={"help": "Whether to run training."})
+    do_eval: bool = field(default=False, metadata={"help": "Whether to run eval on the dev set."})
+    do_predict: bool = field(default=False, metadata={"help": "Whether to run predictions on the test set."})
+
+    per_device_train_batch_size: int = field(
+        default=8, metadata={"help": "Batch size per GPU/TPU core/CPU for training."}
+    )
+    per_device_eval_batch_size: int = field(
+        default=8, metadata={"help": "Batch size per GPU/TPU core/CPU for evaluation."}
+    )
+    seed: int = field(default=42, metadata={"help": "Random seed that will be set at the beginning of training."})
+
+    learning_rate: float = field(default=5e-5, metadata={"help": "The initial learning rate for AdamW."})
+    weight_decay: float = field(default=0.0, metadata={"help": "Weight decay for AdamW if we apply some."})
+    adam_beta1: float = field(default=0.9, metadata={"help": "Beta1 for AdamW optimizer"})
+    adam_beta2: float = field(default=0.999, metadata={"help": "Beta2 for AdamW optimizer"})
+    adam_epsilon: float = field(default=1e-8, metadata={"help": "Epsilon for AdamW optimizer."})
+    max_grad_norm: float = field(default=1.0, metadata={"help": "Max gradient norm."})
+
+    num_train_epochs: float = field(default=3.0, metadata={"help": "Total number of training epochs to perform."})
+    max_steps: int = field(
+        default=-1,
+        metadata={"help": "If > 0: set total number of training steps to perform. Override num_train_epochs."},
+    )
+
+    warmup_ratio: float = field(
+        default=0.0, metadata={"help": "Linear warmup over warmup_ratio fraction of total steps."}
+    )
+    warmup_steps: int = field(default=0, metadata={"help": "Linear warmup over warmup_steps."})
+
+    fp16: bool = field(
+        default=False,
+        metadata={"help": "Whether to use fp16 (mixed) precision instead of 32-bit"},
+    )
+    no_cuda: bool = field(default=False, metadata={"help": "Do not use CUDA even when it is available"})
+    xla: bool = field(default=False, metadata={"help": "Whether to activate the XLA compilation or not"})
+
+    push_to_hub: bool = field(
+        default=False, metadata={"help": "Whether or not to upload the trained model to the model hub after training."}
+    )
+    resume_from_checkpoint: Optional[str] = field(
+        default=None,
+        metadata={"help": "The path to a folder with a valid checkpoint for your model."},
+    )
+    hub_model_id: Optional[str] = field(
+        default=None, metadata={"help": "The name of the repository to keep in sync with the local `output_dir`."}
+    )
+    hub_token: Optional[str] = field(default=None, metadata={"help": "The token to use to push to the Model Hub."})
+    hub_private_repo: bool = field(default=False, metadata={"help": "Whether the model repository is private or not."})
+
+    push_to_hub_model_id: Optional[str] = field(
+        default=None, metadata={"help": "The name of the repository to which push the `Trainer`."}
+    )
+    push_to_hub_organization: Optional[str] = field(
+        default=None, metadata={"help": "The name of the organization in with to which push the `Trainer`."}
+    )
+    push_to_hub_token: Optional[str] = field(
+        default=None, metadata={"help": "The token to use to push to the Model Hub."}
+    )
+
+    @cached_property
+    def _setup_strategy(self) -> Tuple["tf.distribute.Strategy", int]:
+        requires_backends(self, ["tf"])
+        logger.info("Tensorflow: setting up strategy")
+
+        gpus = tf.config.list_physical_devices("GPU")
+
+        # Set to float16 at first
+        if self.fp16:
+            tf.keras.mixed_precision.set_global_policy("mixed_float16")
+
+        if self.no_cuda:
+            strategy = tf.distribute.OneDeviceStrategy(device="/cpu:0")
+        else:
+            if len(gpus) == 0:
+                strategy = tf.distribute.OneDeviceStrategy(device="/cpu:0")
+            elif len(gpus) == 1:
+                strategy = tf.distribute.OneDeviceStrategy(device="/gpu:0")
+            elif len(gpus) > 1:
+                # If you only want to use a specific subset of GPUs use `CUDA_VISIBLE_DEVICES=0`
+                strategy = tf.distribute.MirroredStrategy()
+            else:
+                raise ValueError("Cannot find the proper strategy, please check your environment properties.")
+
+        return strategy
+
+    @property
+    def strategy(self) -> "tf.distribute.Strategy":
+        """
+        The strategy used for distributed training.
+        """
+        requires_backends(self, ["tf"])
+        return self._setup_strategy
+
+    @property
+    def n_replicas(self) -> int:
+        """
+        The number of replicas (CPUs, GPUs or TPU cores) used in this training.
+        """
+        requires_backends(self, ["tf"])
+        return self._setup_strategy.num_replicas_in_sync

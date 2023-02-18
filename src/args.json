@@ -18,5 +18,6 @@
     "push_to_hub_model_id": "test333",
     "push_to_hub": true,
     "push_to_hub_token": "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",
-    "xla": true
+    "xla": true,
+    "fp16": true
 }

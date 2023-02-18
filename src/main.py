@@ -1,36 +1,44 @@
-import json
 import os
 import sys
 import logging
+import json
+from tqdm import tqdm
 
-import datasets
 import evaluate
 import nltk
-import numpy as np
 import tensorflow as tf
+import numpy as np
+import datasets
+import huggingface_hub
 from datasets import load_dataset
-from utils import ModelArguments, DataTrainingArguments, TFTrainingArguments
-
 import transformers
 from transformers import (
     AutoTokenizer,
     DataCollatorForSeq2Seq,
     TFAutoModelForSeq2SeqLM,
     HfArgumentParser,
-    KerasMetricCallback,
     PushToHubCallback,
-    # TFTrainingArguments,
-    create_optimizer,
-    set_seed
+    create_optimizer
+)
+from utils import (
+    ModelArguments,
+    DataTrainingArguments,
+    TFTrainingArguments
 )
 from transformers.trainer_utils import get_last_checkpoint
+
 
 logger = logging.getLogger(__name__)
 nltk.download("punkt")
 
+
 def main():
     # region Argument parsing
     parser = HfArgumentParser((ModelArguments, DataTrainingArguments, TFTrainingArguments))
+    model_args: ModelArguments
+    data_args: DataTrainingArguments
+    training_args: TFTrainingArguments
+
     if len(sys.argv) == 2 and sys.argv[1].endswith(".json"):
         # Parse arguments from json file
         model_args, data_args, training_args = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
@@ -47,6 +55,9 @@ def main():
     logger.setLevel(logging.INFO)
     datasets.utils.logging.set_verbosity(logging.INFO)
     transformers.utils.logging.set_verbosity(logging.INFO)
+
+    # Login to HuggingFace hub
+    huggingface_hub.login(training_args.hub_token)
 
     logger.info(f"Training/evaluation parameters {training_args}")
     # endregion
@@ -82,9 +93,7 @@ def main():
             )
     # endregion
 
-    set_seed(training_args.seed)
-
-    # region Load datasets
+    # region Load dataset
     raw_datasets = load_dataset(
         data_args.dataset_name,
         data_args.dataset_config_name,
@@ -93,16 +102,23 @@ def main():
     )
     # endregion
 
-    # region Load Tokenizer
+    # region Load tokenizer
     tokenizer = AutoTokenizer.from_pretrained(
         model_args.tokenizer_name if model_args.tokenizer_name else model_args.model_name_or_path,
         cache_dir=model_args.cache_dir,
-        use_fast_toeknizer=model_args.use_fast_tokenizer,
-        revision=model_args.model_revision,
+        use_fast_tokenizer=model_args.use_fast_tokenizer,
         use_auth_token=model_args.use_auth_token
     )
 
     prefix = data_args.source_prefix if data_args.source_prefix is not None else ""
+    # endregion
+
+    # region Load model
+    model = TFAutoModelForSeq2SeqLM.from_pretrained(
+        model_args.model_name_or_path,
+        cache_dir=model_args.cache_dir,
+        use_auth_token=model_args.use_auth_token
+    )
     # endregion
 
     # region Data preprocessing
@@ -125,7 +141,7 @@ def main():
         inputs = [prefix + s for s in inputs]
         targets = batch[target_column]
 
-        model_inputs = tokenizer(inputs, max_length=data_args.max_source_length, truncation=True)
+        model_inputs = tokenizer(inputs, max_length=data_args.max_source_length, padding=padding, truncation=True)
         labels = tokenizer(text_target=targets, max_length=data_args.max_target_length, padding=padding, truncation=True)
 
         if padding == "max_length" and data_args.ignore_pad_token_for_loss:
@@ -135,7 +151,7 @@ def main():
 
         model_inputs["labels"] = labels["input_ids"]
         return model_inputs
-    
+
     # Preprocess train dataset
     if "train" not in raw_datasets:
         raise ValueError("A train dataset is required.")
@@ -143,7 +159,7 @@ def main():
     if data_args.max_train_samples is not None:
         max_train_samples = min(len(train_dataset), data_args.max_train_samples)
         train_dataset = train_dataset.select(range(max_train_samples))
-    # with training_args.main_process_first(desc="Train dataset map preprocessing"):
+
     train_dataset = train_dataset.map(
         preprocess_function,
         batched=True,
@@ -153,26 +169,22 @@ def main():
         desc="Running tokenizer on train dataset"
     )
     
-    if training_args.do_eval:
-        # max_target_length = data_args.val_max_target_length
-        if "validation" not in raw_datasets:
-            raise ValueError("--do_eval requires a validation dataset")
-        eval_dataset = raw_datasets["validation"]
-        if data_args.max_eval_samples is not None:
-            max_eval_samples = min(len(eval_dataset), data_args.max_eval_samples)
-            eval_dataset = eval_dataset.select(range(max_eval_samples))
-        # with training_args.main_process_first(desc="validation dataset map pre-processing"):
-        eval_dataset = eval_dataset.map(
-            preprocess_function,
-            batched=True,
-            num_proc=data_args.preprocessing_num_workers,
-            remove_columns=column_names,
-            load_from_cache_file=not data_args.overwrite_cache,
-            desc="Running tokenizer on validation dataset",
-        )
-    else:
-        eval_dataset = None
-    
+    # Preprocess validation dataset
+    if "validation" not in raw_datasets:
+        raise ValueError("A validation dataset is required.")
+    eval_dataset = raw_datasets["validation"]
+    if data_args.max_eval_samples is not None:
+        max_eval_samples = min(len(eval_dataset), data_args.max_eval_samples)
+        eval_dataset = eval_dataset.select(range(max_eval_samples))
+
+    eval_dataset = eval_dataset.map(
+        preprocess_function,
+        batched=True,
+        num_proc=data_args.preprocessing_num_workers,
+        remove_columns=column_names,
+        load_from_cache_file=not data_args.overwrite_cache,
+        desc="Running tokenizer on validation dataset",
+    )
     # endregion
 
     # region Text preprocessing
@@ -188,24 +200,70 @@ def main():
 
     # endregion
 
-    with training_args.strategy.scope():
-        # region Prepare model
-        model = TFAutoModelForSeq2SeqLM.from_pretrained(
-            model_args.model_name_or_path,
-            cache_dir=model_args.cache_dir,
-            revision=model_args.model_revision,
-            use_auth_token=model_args.use_auth_token
+    # region Compute metric
+    rouge_score = evaluate.load("rougs")
+
+    def compute_metric(
+        tokenized_dataset=eval_dataset,
+        metric=rouge_score,
+        model=model,
+        batch_size=8,
+    ):
+    
+        generation_data_collator = DataCollatorForSeq2Seq(
+            tokenizer=tokenizer, 
+            model=model, 
+            return_tensors="tf", 
+            pad_to_multiple_of=256
         )
-        # endregion
 
+        tf_generate_dataset = model.prepare_tf_dataset(
+            tokenized_dataset,
+            collate_fn=generation_data_collator,
+            shuffle=False,
+            batch_size=batch_size,
+            drop_remainder=True,
+        )
+
+        @tf.function(jit_compile=True)
+        def generate_with_xla(batch):
+            return model.generate(
+                input_ids=batch["input_ids"],
+                attention_mask=batch["attention_mask"],
+                max_new_tokens=32,
+            )
+
+        all_preds = []
+        all_labels = []
+        for batch, labels in tqdm(tf_generate_dataset):
+            predictions = generate_with_xla(batch)
+            decoded_preds = tokenizer.batch_decode(predictions, skip_special_tokens=True)
+            labels = labels.numpy()
+            labels = np.where(labels != -100, labels, tokenizer.pad_token_id)
+            decoded_labels = tokenizer.batch_decode(
+                labels, 
+                skip_special_tokens=True,
+                clean_up_tokenization_spaces=True,
+            )
+            decoded_preds, decoded_labels = postprocess_text(decoded_preds, decoded_labels)
+            all_preds.extend(decoded_preds)
+            all_labels.extend(decoded_labels)
+        
+        return metric.compute(
+            predictions=all_preds, 
+            references=all_labels, 
+            use_stemmer=True
+        )
+    # endregion
+
+    with training_args.strategy.scope():
         # region Prepare TF datasets
-
         label_pad_token_id = -100 if data_args.ignore_pad_token_for_loss else tokenizer.pad_token_id
         data_collator = DataCollatorForSeq2Seq(
             tokenizer,
             model=model,
             label_pad_token_id=label_pad_token_id,
-            pad_to_multiple_of=256,  # Reduce the number of unique shapes for XLA, especially for generation
+            pad_to_multiple_of=512,  # Reduce the number of unique shapes for XLA, especially for generation
             return_tensors="tf",
         )
 
@@ -222,6 +280,7 @@ def main():
             batch_size=total_train_batch_size,
             shuffle=True,
         ).with_options(dataset_options)
+
         tf_eval_dataset = model.prepare_tf_dataset(
             eval_dataset,
             collate_fn=data_collator,
@@ -251,76 +310,31 @@ def main():
         )
         # endregion
 
-        # region Metric and KerasMetricCallback
-        if training_args.do_eval:
-            metric = evaluate.load("rouge")
+        # region Push to hub
 
-            if data_args.val_max_target_length is None:
-                data_args.val_max_target_length = data_args.max_target_length
-
-            gen_kwargs = {
-                "max_length": data_args.val_max_target_length,
-                "num_beams": data_args.num_beams,
-                # "no_repeat_ngram_size": 0,  # Not supported under XLA right now, and some models set it by default
-            }
-
-            def compute_metrics(predictions, labels):
-                # if isinstance(predictions, tuple):
-                #     predictions = predictions[0]
-                decoded_preds = tokenizer.batch_decode(predictions, skip_special_tokens=True)
-                labels = np.where(labels != -100, labels, tokenizer.pad_token_id)
-                decoded_labels = tokenizer.batch_decode(labels, skip_special_tokens=True)
-                decoded_preds, decoded_labels = postprocess_text(decoded_preds, decoded_labels)
-                metrics = metric.compute(predictions=decoded_preds, references=decoded_labels, use_stemmer=True)
-                metrics = {key: round(val * 100, 4) for key, val in metrics.items()}
-                return metrics
-
-            metric_callback = KerasMetricCallback(
-                metric_fn=compute_metrics,
-                eval_dataset=tf_eval_dataset,
-                predict_with_generate=True,
-                use_xla_generation=True,
-                generate_kwargs=gen_kwargs,
-            )
-            callbacks = [metric_callback]
-        else:
-            callbacks = []
-        # endregion
-
-        # region Preparing push_to_hub and model card
-        push_to_hub_model_id = training_args.push_to_hub_model_id
-        model_name = model_args.model_name_or_path.split("/")[-1]
-        if not push_to_hub_model_id:
-            if data_args.dataset_name is not None:
-                push_to_hub_model_id = f"{model_name}-finetuned-{data_args.dataset_name}"
-            else:
-                push_to_hub_model_id = f"{model_name}-finetuned-summarization"
-
-        model_card_kwargs = {"finetuned_from": model_args.model_name_or_path, "tasks": "summarization"}
-        if data_args.dataset_name is not None:
-            model_card_kwargs["dataset_tags"] = data_args.dataset_name
-            if data_args.dataset_config_name is not None:
-                model_card_kwargs["dataset_args"] = data_args.dataset_config_name
-                model_card_kwargs["dataset"] = f"{data_args.dataset_name} {data_args.dataset_config_name}"
-            else:
-                model_card_kwargs["dataset"] = data_args.dataset_name
-
+        callbacks = []
+                
         if training_args.push_to_hub:
-            # Because this training can be quite long, we save once per epoch.
-            callbacks.append(
-                PushToHubCallback(
-                    output_dir=training_args.output_dir,
-                    model_id=push_to_hub_model_id,
-                    organization=training_args.push_to_hub_organization,
-                    token=training_args.push_to_hub_token,
-                    tokenizer=tokenizer,
-                    **model_card_kwargs,
-                )
-            )
+            push_to_hub_model_id = training_args.push_to_hub_model_id
+            model_name = model_args.model_name_or_path.split("/")[-1]
+            if not push_to_hub_model_id:
+                if data_args.dataset_name is not None:
+                    push_to_hub_model_id = f"{model_name}-finetuned-{data_args.dataset_name}"
+                else:
+                    push_to_hub_model_id = f"{model_name}-finetuned-summarization"
+            callbacks.append(PushToHubCallback(
+                output_dir=training_args.output_dir,
+                model_id=push_to_hub_model_id,
+                organization=training_args.push_to_hub_organization,
+                token=training_args.push_to_hub_token,
+                tokenizer=tokenizer,
+            ))
+        
         # endregion
 
         # region Training
         model.compile(optimizer=optimizer, jit_compile=training_args.xla)
+        tf.keras.mixed_precision.set_global_policy("mixed_float16")
         eval_metrics = None
 
         logger.info("***** Running training *****")
@@ -335,32 +349,16 @@ def main():
                 "XLA training may be slow at first when --pad_to_max_length is not set "
                 "until all possible shapes have been compiled."
             )
+
         history = model.fit(tf_train_dataset, validation_data=tf_eval_dataset, epochs=int(training_args.num_train_epochs), callbacks=callbacks)
         eval_metrics = {key: val[-1] for key, val in history.history.items()}
         # endregion
 
         # region Evaluation
-
         if training_args.do_eval:
             logger.info("Evaluation...")
 
-            @tf.function(jit_compile=True)
-            def generate(**kwargs):
-                return model.generate(**kwargs)
-
-            for batch, labels in tf_eval_dataset:
-                batch.update(gen_kwargs)
-                generated_tokens = generate(**batch)
-                # if isinstance(generated_tokens, tuple):
-                #     generated_tokens = generated_tokens[0]
-                decoded_preds = tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)
-                labels = np.where(labels != -100, labels, tokenizer.pad_token_id)
-                decoded_labels = tokenizer.batch_decode(labels, skip_special_tokens=True)
-                decoded_preds, decoded_labels = postprocess_text(decoded_preds, decoded_labels)
-
-                metric.add_batch(predictions=decoded_preds, references=decoded_labels)
-
-            eval_metrics = metric.compute(use_stemmer=True)
+            eval_metrics = compute_metric()
 
             result = {key: round(val * 100, 4) for key, val in eval_metrics.items()}
             logger.info(result)
@@ -374,6 +372,7 @@ def main():
         if training_args.output_dir is not None and not training_args.push_to_hub:
             # If we're not pushing to hub, at least save a local copy when we're done
             model.save_pretrained(training_args.output_dir)
+
 
 if __name__ == "__main__":
     main()
