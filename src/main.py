@@ -36,6 +36,9 @@ print(f"Number of available GPUs: {len(tf.config.list_physical_devices('GPU'))}"
 if len(tf.config.list_physical_devices("GPU")) == 0:
     sys.exit()
 
+import mlflow
+mlflow.autolog()
+
 
 
 def main():
@@ -64,7 +67,7 @@ def main():
 
     # Login to HuggingFace hub
     if training_args.push_to_hub_token is not None:
-        huggingface_hub.login(training_args.push_to_hub_token)
+        huggingface_hub.login(training_args.push_to_hub_token, add_to_git_credential=True)
 
     logger.info(f"Training/evaluation parameters {training_args}")
     # endregion
