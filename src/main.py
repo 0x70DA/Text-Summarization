@@ -30,7 +30,7 @@ from transformers.trainer_utils import get_last_checkpoint
 
 
 logger = logging.getLogger(__name__)
-logger.INFO(f"Number of available GPUs: {len(tf.config.list_physical_devices('GPU'))}")
+logger.info(f"Number of available GPUs: {len(tf.config.list_physical_devices('GPU'))}")
 
 mlflow.autolog()
 nltk.download("punkt")
