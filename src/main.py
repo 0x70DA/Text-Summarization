@@ -7,6 +7,7 @@ from tqdm import tqdm
 import evaluate
 import nltk
 import tensorflow as tf
+import mlflow
 import numpy as np
 import datasets
 import huggingface_hub
@@ -29,15 +30,10 @@ from transformers.trainer_utils import get_last_checkpoint
 
 
 logger = logging.getLogger(__name__)
-nltk.download("punkt")
+logger.INFO(f"Number of available GPUs: {len(tf.config.list_physical_devices('GPU'))}")
 
-print(f"Number of available GPUs: {len(tf.config.list_physical_devices('GPU'))}")
-
-if len(tf.config.list_physical_devices("GPU")) == 0:
-    sys.exit()
-
-import mlflow
 mlflow.autolog()
+nltk.download("punkt")
 
 
 
@@ -53,6 +49,10 @@ def main():
         model_args, data_args, training_args = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
     else:
         model_args, data_args, training_args = parser.parse_args_into_dataclasses()
+
+    if training_args.use_gpu and len(tf.config.list_physical_devices("GPU")) == 0:
+        raise ValueError("No GPUs available for training")
+
     # endregion
 
     # region Logging

@@ -186,6 +186,9 @@ class TFTrainingArguments:
     per_device_eval_batch_size: int = field(
         default=8, metadata={"help": "Batch size per GPU/TPU core/CPU for evaluation."}
     )
+    use_gpu: bool = field(
+        default=True, metadata={"help": "Whether or not to train on GPU."}
+    )
     seed: int = field(default=42, metadata={"help": "Random seed that will be set at the beginning of training."})
 
     learning_rate: float = field(default=5e-5, metadata={"help": "The initial learning rate for AdamW."})
