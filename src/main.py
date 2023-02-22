@@ -1,33 +1,29 @@
+import json
+import logging
 import os
 import sys
-import logging
-import json
-from tqdm import tqdm
 
-import evaluate
-import nltk
-import tensorflow as tf
-import mlflow
-import numpy as np
 import datasets
+import evaluate
 import huggingface_hub
-from datasets import load_dataset
+import mlflow
+import nltk
+import numpy as np
+import tensorflow as tf
 import transformers
+from datasets import load_dataset
+from tqdm import tqdm
 from transformers import (
     AutoTokenizer,
     DataCollatorForSeq2Seq,
-    TFAutoModelForSeq2SeqLM,
     HfArgumentParser,
     PushToHubCallback,
-    create_optimizer
-)
-from utils import (
-    ModelArguments,
-    DataTrainingArguments,
-    TFTrainingArguments
+    TFAutoModelForSeq2SeqLM,
+    create_optimizer,
 )
 from transformers.trainer_utils import get_last_checkpoint
 
+from utils import DataTrainingArguments, ModelArguments, TFTrainingArguments
 
 logger = logging.getLogger(__name__)
 logger.info(f"Number of available GPUs: {len(tf.config.list_physical_devices('GPU'))}")
@@ -36,17 +32,20 @@ mlflow.autolog()
 nltk.download("punkt")
 
 
-
 def main():
     # region Argument parsing
-    parser = HfArgumentParser((ModelArguments, DataTrainingArguments, TFTrainingArguments))
+    parser = HfArgumentParser(
+        (ModelArguments, DataTrainingArguments, TFTrainingArguments)
+    )
     model_args: ModelArguments
     data_args: DataTrainingArguments
     training_args: TFTrainingArguments
 
     if len(sys.argv) == 2 and sys.argv[1].endswith(".json"):
         # Parse arguments from json file
-        model_args, data_args, training_args = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
+        model_args, data_args, training_args = parser.parse_json_file(
+            json_file=os.path.abspath(sys.argv[1])
+        )
     else:
         model_args, data_args, training_args = parser.parse_args_into_dataclasses()
 
@@ -67,7 +66,9 @@ def main():
 
     # Login to HuggingFace hub
     if training_args.push_to_hub_token is not None:
-        huggingface_hub.login(training_args.push_to_hub_token, add_to_git_credential=True)
+        huggingface_hub.login(
+            training_args.push_to_hub_token, add_to_git_credential=True
+        )
 
     logger.info(f"Training/evaluation parameters {training_args}")
     # endregion
@@ -88,15 +89,20 @@ def main():
 
     # region Detecting last checkpoint
     last_checkpoint = None
-    if os.path.isdir(training_args.output_dir) and not training_args.overwrite_output_dir:
+    if (
+        os.path.isdir(training_args.output_dir)
+        and not training_args.overwrite_output_dir
+    ):
         last_checkpoint = get_last_checkpoint(training_args.output_dir)
 
         if last_checkpoint is None and len(os.listdir(training_args.output_dir)) > 0:
             raise ValueError(
-                    f"Output directory ({training_args.output_dir}) already exists and is not empty. "
-                    "Use --overwrite_output_dir to overcome."
-                )
-        elif last_checkpoint is not None and training_args.resume_from_checkpoint is None:
+                f"Output directory ({training_args.output_dir}) already exists and is not empty. "
+                "Use --overwrite_output_dir to overcome."
+            )
+        elif (
+            last_checkpoint is not None and training_args.resume_from_checkpoint is None
+        ):
             logger.info(
                 f"Checkpoint detected, resuming training at {last_checkpoint}. To avoid this behavior, change "
                 "the `--output_dir` or add `--overwrite_output_dir` to train from scratch."
@@ -108,16 +114,18 @@ def main():
         data_args.dataset_name,
         data_args.dataset_config_name,
         cache_dir=model_args.cache_dir,
-        use_auth_token=model_args.use_auth_token
+        use_auth_token=model_args.use_auth_token,
     )
     # endregion
 
     # region Load tokenizer
     tokenizer = AutoTokenizer.from_pretrained(
-        model_args.tokenizer_name if model_args.tokenizer_name else model_args.model_name_or_path,
+        model_args.tokenizer_name
+        if model_args.tokenizer_name
+        else model_args.model_name_or_path,
         cache_dir=model_args.cache_dir,
         use_fast_tokenizer=model_args.use_fast_tokenizer,
-        use_auth_token=model_args.use_auth_token
+        use_auth_token=model_args.use_auth_token,
     )
 
     prefix = data_args.source_prefix if data_args.source_prefix is not None else ""
@@ -135,7 +143,7 @@ def main():
         raise ValueError(
             f"--target_column value `{data_args.target_column} needs to be one of: {', '.join(column_names)}`"
         )
-    
+
     padding = "max_length" if data_args.pad_to_max_length else False
 
     def preprocess_function(batch):
@@ -143,12 +151,23 @@ def main():
         inputs = [prefix + s for s in inputs]
         targets = batch[target_column]
 
-        model_inputs = tokenizer(inputs, max_length=data_args.max_source_length, padding=padding, truncation=True)
-        labels = tokenizer(text_target=targets, max_length=data_args.max_target_length, padding=padding, truncation=True)
+        model_inputs = tokenizer(
+            inputs,
+            max_length=data_args.max_source_length,
+            padding=padding,
+            truncation=True,
+        )
+        labels = tokenizer(
+            text_target=targets,
+            max_length=data_args.max_target_length,
+            padding=padding,
+            truncation=True,
+        )
 
         if padding == "max_length" and data_args.ignore_pad_token_for_loss:
             labels["input_ids"] = [
-                [(l if l != tokenizer.pad_token_id else -100) for l in label] for label in labels["input_ids"]
+                [(l if l != tokenizer.pad_token_id else -100) for l in label]
+                for label in labels["input_ids"]
             ]
 
         model_inputs["labels"] = labels["input_ids"]
@@ -168,9 +187,9 @@ def main():
         num_proc=data_args.preprocessing_num_workers,
         remove_columns=column_names,
         load_from_cache_file=not data_args.overwrite_cache,
-        desc="Running tokenizer on train dataset"
+        desc="Running tokenizer on train dataset",
     )
-    
+
     # Preprocess validation dataset
     if "validation" not in raw_datasets:
         raise ValueError("A validation dataset is required.")
@@ -202,18 +221,19 @@ def main():
 
     # endregion
 
-
     with training_args.strategy.scope():
         # region Load model
         model = TFAutoModelForSeq2SeqLM.from_pretrained(
             model_args.model_name_or_path,
             cache_dir=model_args.cache_dir,
-            use_auth_token=model_args.use_auth_token
+            use_auth_token=model_args.use_auth_token,
         )
         # endregion
 
         # region Prepare TF datasets
-        label_pad_token_id = -100 if data_args.ignore_pad_token_for_loss else tokenizer.pad_token_id
+        label_pad_token_id = (
+            -100 if data_args.ignore_pad_token_for_loss else tokenizer.pad_token_id
+        )
         data_collator = DataCollatorForSeq2Seq(
             tokenizer,
             model=model,
@@ -223,10 +243,14 @@ def main():
         )
 
         dataset_options = tf.data.Options()
-        dataset_options.experimental_distribute.auto_shard_policy = tf.data.experimental.AutoShardPolicy.OFF
+        dataset_options.experimental_distribute.auto_shard_policy = (
+            tf.data.experimental.AutoShardPolicy.OFF
+        )
 
         num_replicas = training_args.strategy.num_replicas_in_sync
-        total_train_batch_size = training_args.per_device_train_batch_size * num_replicas
+        total_train_batch_size = (
+            training_args.per_device_train_batch_size * num_replicas
+        )
         total_eval_batch_size = training_args.per_device_eval_batch_size * num_replicas
 
         tf_train_dataset = model.prepare_tf_dataset(
@@ -253,12 +277,11 @@ def main():
             model=model,
             batch_size=8,
         ):
-        
             generation_data_collator = DataCollatorForSeq2Seq(
-                tokenizer=tokenizer, 
-                model=model, 
-                return_tensors="tf", 
-                pad_to_multiple_of=256
+                tokenizer=tokenizer,
+                model=model,
+                return_tensors="tf",
+                pad_to_multiple_of=256,
             )
 
             tf_generate_dataset = model.prepare_tf_dataset(
@@ -281,23 +304,26 @@ def main():
             all_labels = []
             for batch, labels in tqdm(tf_generate_dataset):
                 predictions = generate_with_xla(batch)
-                decoded_preds = tokenizer.batch_decode(predictions, skip_special_tokens=True)
+                decoded_preds = tokenizer.batch_decode(
+                    predictions, skip_special_tokens=True
+                )
                 labels = labels.numpy()
                 labels = np.where(labels != -100, labels, tokenizer.pad_token_id)
                 decoded_labels = tokenizer.batch_decode(
-                    labels, 
+                    labels,
                     skip_special_tokens=True,
                     clean_up_tokenization_spaces=True,
                 )
-                decoded_preds, decoded_labels = postprocess_text(decoded_preds, decoded_labels)
+                decoded_preds, decoded_labels = postprocess_text(
+                    decoded_preds, decoded_labels
+                )
                 all_preds.extend(decoded_preds)
                 all_labels.extend(decoded_labels)
-            
+
             return metric.compute(
-                predictions=all_preds, 
-                references=all_labels, 
-                use_stemmer=True
+                predictions=all_preds, references=all_labels, use_stemmer=True
             )
+
         # endregion
 
         # region Optimizer, loss and LR scheduling
@@ -321,37 +347,19 @@ def main():
         )
         # endregion
 
-        # region Push to hub
-
-        callbacks = []
-                
-        if training_args.push_to_hub and training_args.push_to_hub_token is not None:
-            push_to_hub_model_id = training_args.push_to_hub_model_id
-            model_name = model_args.model_name_or_path.split("/")[-1]
-            if not push_to_hub_model_id:
-                if data_args.dataset_name is not None:
-                    push_to_hub_model_id = f"{model_name}-finetuned-{data_args.dataset_name}"
-                else:
-                    push_to_hub_model_id = f"{model_name}-finetuned-summarization"
-            callbacks.append(PushToHubCallback(
-                output_dir=training_args.output_dir,
-                hub_model_id=push_to_hub_model_id,
-                tokenizer=tokenizer,
-            ))
-        
-        # endregion
-
         # region Training
         model.compile(optimizer=optimizer, jit_compile=training_args.xla)
         if training_args.fp16:
             tf.keras.mixed_precision.set_global_policy("mixed_float16")
-            
+
         eval_metrics = None
 
         logger.info("***** Running training *****")
         logger.info(f"  Num examples = {len(train_dataset)}")
         logger.info(f"  Num Epochs = {training_args.num_train_epochs}")
-        logger.info(f"  Instantaneous batch size per device = {training_args.per_device_train_batch_size}")
+        logger.info(
+            f"  Instantaneous batch size per device = {training_args.per_device_train_batch_size}"
+        )
         logger.info(f"  Total train batch size = {total_train_batch_size}")
         logger.info(f"  Total optimization steps = {num_train_steps}")
 
@@ -361,7 +369,11 @@ def main():
                 "until all possible shapes have been compiled."
             )
 
-        history = model.fit(tf_train_dataset, validation_data=tf_eval_dataset, epochs=int(training_args.num_train_epochs), callbacks=callbacks)
+        history = model.fit(
+            tf_train_dataset,
+            validation_data=tf_eval_dataset,
+            epochs=int(training_args.num_train_epochs),
+        )
         eval_metrics = {key: val[-1] for key, val in history.history.items()}
         # endregion
 
@@ -375,14 +387,38 @@ def main():
             logger.info(result)
         # endregion
 
-        if training_args.output_dir is not None and eval_metrics is not None:
-            output_eval_file = os.path.join(training_args.output_dir, "all_results.json")
+        if eval_metrics is not None:
+            output_eval_file = os.path.join(
+                training_args.output_dir, "all_results.json"
+            )
             with open(output_eval_file, "w") as writer:
                 writer.write(json.dumps(eval_metrics))
 
-        if training_args.output_dir is not None and not training_args.push_to_hub:
-            # If we're not pushing to hub, at least save a local copy when we're done
+        # region Push to hub
+
+        if training_args.push_to_hub and training_args.push_to_hub_token is not None:
+            push_to_hub_model_id = training_args.push_to_hub_model_id
+            model_name = model_args.model_name_or_path.split("/")[-1]
+            if not push_to_hub_model_id:
+                if data_args.dataset_name is not None:
+                    push_to_hub_model_id = (
+                        f"{model_name}-finetuned-{data_args.dataset_name}"
+                    )
+                else:
+                    push_to_hub_model_id = f"{model_name}-finetuned-summarization"
+
+            model.push_to_hub(
+                push_to_hub_model_id, use_auth_token=training_args.push_to_hub_token
+            )
+            tokenizer.push_to_hub(
+                push_to_hub_model_id, use_auth_token=training_args.push_to_hub_token
+            )
+
+        # endregion
+
+        if training_args.save_local:
             model.save_pretrained(training_args.output_dir)
+            tokenizer.save_pretrained(training_args.output_dir)
 
 
 if __name__ == "__main__":
