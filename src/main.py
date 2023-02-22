@@ -49,6 +49,10 @@ def main():
     else:
         model_args, data_args, training_args = parser.parse_args_into_dataclasses()
 
+    # Create the output directory if it doesn't exist
+    if not os.path.exists(training_args.output_dir):
+        os.makedirs(training_args.output_dir)
+
     if training_args.use_gpu and len(tf.config.list_physical_devices("GPU")) == 0:
         raise ValueError("No GPUs available for training")
 
