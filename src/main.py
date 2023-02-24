@@ -3,14 +3,11 @@ import logging
 import os
 import sys
 
-import datasets
 import evaluate
-import huggingface_hub
-import mlflow
+from huggingface_hub import login
 import nltk
 import numpy as np
 import tensorflow as tf
-import transformers
 from datasets import load_dataset
 from tqdm import tqdm
 from transformers import (
@@ -28,7 +25,6 @@ from utils import DataTrainingArguments, ModelArguments, TFTrainingArguments
 logger = logging.getLogger(__name__)
 logger.info(f"Number of available GPUs: {len(tf.config.list_physical_devices('GPU'))}")
 
-mlflow.autolog()
 nltk.download("punkt")
 
 
@@ -65,12 +61,11 @@ def main():
         handlers=[logging.StreamHandler(sys.stdout)],
     )
     logger.setLevel(logging.INFO)
-    datasets.utils.logging.set_verbosity(logging.INFO)
-    transformers.utils.logging.set_verbosity(logging.INFO)
+
 
     # Login to HuggingFace hub
     if training_args.push_to_hub_token is not None:
-        huggingface_hub.login(
+        login(
             training_args.push_to_hub_token, add_to_git_credential=True
         )
 
@@ -128,6 +123,7 @@ def main():
         if model_args.tokenizer_name
         else model_args.model_name_or_path,
         cache_dir=model_args.cache_dir,
+        model_max_length=data_args.max_source_length,
         use_fast_tokenizer=model_args.use_fast_tokenizer,
         use_auth_token=model_args.use_auth_token,
     )
