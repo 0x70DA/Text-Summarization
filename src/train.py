@@ -18,6 +18,8 @@ from transformers import (
     TFAutoModelForSeq2SeqLM,
     create_optimizer,
 )
+import wandb
+from wandb.keras import WandbMetricsLogger, WandbModelCheckpoint
 
 from utils import DataTrainingArguments, ModelArguments, TFTrainingArguments
 
@@ -69,6 +71,17 @@ def main():
         )
 
     logger.info(f"Training/evaluation parameters {training_args}")
+    # endregion
+
+    # region Setup wandb
+    callbacks = []
+    if data_args.wandb_track:
+        wandb.init(project="Summarization")
+        callbacks.extend([
+            WandbMetricsLogger(log_freq=5),
+            WandbModelCheckpoint("models")
+        ])
+
     # endregion
 
     # region T5 special-casing
@@ -216,7 +229,7 @@ def main():
             tokenizer,
             model=model,
             label_pad_token_id=label_pad_token_id,
-            pad_to_multiple_of=512,  # Reduce the number of unique shapes for XLA, especially for generation
+            pad_to_multiple_of=data_args.pad_to_multiple_of,  # Reduce the number of unique shapes for XLA, especially for generation
             return_tensors="tf",
         )
 
@@ -326,7 +339,8 @@ def main():
         # endregion
 
         # region Training
-        model.compile(optimizer=optimizer, jit_compile=training_args.xla)
+        model.compile(optimizer=optimizer, jit_compile=training_args.xla, metrics=["accuracy"])
+
         if training_args.fp16:
             tf.keras.mixed_precision.set_global_policy("mixed_float16")
 
@@ -346,11 +360,12 @@ def main():
                 "XLA training may be slow at first when --pad_to_max_length is not set "
                 "until all possible shapes have been compiled."
             )
-
+        
         history = model.fit(
             tf_train_dataset,
             validation_data=tf_eval_dataset,
             epochs=int(training_args.num_train_epochs),
+            callbacks=callbacks
         )
         eval_metrics = {key: val[-1] for key, val in history.history.items()}
         # endregion
@@ -397,6 +412,9 @@ def main():
         if training_args.save_local:
             model.save_pretrained(training_args.output_dir)
             tokenizer.save_pretrained(training_args.output_dir)
+
+        if data_args.wandb_track:
+            wandb.finish()
 
 
 if __name__ == "__main__":

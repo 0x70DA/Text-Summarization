@@ -129,6 +129,10 @@ class DataTrainingArguments:
             )
         },
     )
+    pad_to_multiple_of: Optional[int] = field(
+        default=512,
+        metadata={"help": "Pad the tokenized dataset to multiples of..."}
+    )
     max_train_samples: Optional[int] = field(
         default=None,
         metadata={
@@ -176,6 +180,9 @@ class DataTrainingArguments:
         metadata={
             "help": "A prefix to add before every source text (useful for T5 models)."
         },
+    )
+    wandb_track: bool = field(
+        default=False, metadata={"help": "Use Weights and Biases to track the training process. Need to be logged in to work."}
     )
 
     def __post_init__(self):
