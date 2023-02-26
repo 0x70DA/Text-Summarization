@@ -361,6 +361,10 @@ def main():
                 "until all possible shapes have been compiled."
             )
         
+        callbacks.append(
+            tf.keras.callbacks.EarlyStopping(monitor="val_loss", patience=5, restore_best_weights=True)
+        )
+
         history = model.fit(
             tf_train_dataset,
             validation_data=tf_eval_dataset,
