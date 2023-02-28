@@ -373,11 +373,9 @@ def main():
         train_result = {key: val for key, val in train_metrics.items()}
         logger.info(train_result)
 
-        output_result_file = os.path.join(training_args.output_dir, "all_results.json")
-        with open(output_result_file, "a") as writer:
-            writer.write("Train -> ")
+        train_result_file = os.path.join(training_args.output_dir, "train_results.json")
+        with open(train_result_file, "w") as writer:
             writer.write(json.dumps(train_metrics))
-            writer.write("\n")
         # endregion
 
         # region Evaluation
@@ -392,10 +390,11 @@ def main():
             logger.info(eval_result)
 
         if eval_metrics is not None:
-            with open(output_result_file, "a") as writer:
-                writer.write("Evaluation -> ")
+            eval_result_file = os.path.join(
+                training_args.output_dir, "eval_results.json"
+            )
+            with open(eval_result_file, "w") as writer:
                 writer.write(json.dumps(eval_metrics))
-                writer.write("\n")
         # endregion
 
     # Training is done. Save the model.
