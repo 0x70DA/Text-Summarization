@@ -63,12 +63,9 @@ def main():
     )
     logger.setLevel(logging.INFO)
 
-
     # Login to HuggingFace hub
     if training_args.push_to_hub_token is not None:
-        login(
-            training_args.push_to_hub_token, add_to_git_credential=True
-        )
+        login(training_args.push_to_hub_token, add_to_git_credential=True)
 
     logger.info(f"Training/evaluation parameters {training_args}")
     # endregion
@@ -77,10 +74,9 @@ def main():
     callbacks = []
     if data_args.wandb_track:
         wandb.init(project="Summarization")
-        callbacks.extend([
-            WandbMetricsLogger(log_freq=5),
-            WandbModelCheckpoint("models")
-        ])
+        callbacks.extend(
+            [WandbMetricsLogger(log_freq=5), WandbModelCheckpoint("models")]
+        )
 
     # endregion
 
@@ -97,7 +93,6 @@ def main():
             "`--source_prefix 'summarize: ' `"
         )
     # endregion
-
 
     # region Load dataset
     raw_datasets = load_dataset(
@@ -212,15 +207,73 @@ def main():
 
     # endregion
 
-    with training_args.strategy.scope():
-        # region Load model
-        model = TFAutoModelForSeq2SeqLM.from_pretrained(
-            model_args.model_name_or_path,
-            cache_dir=model_args.cache_dir,
-            use_auth_token=model_args.use_auth_token,
+    # region Load model
+    model = TFAutoModelForSeq2SeqLM.from_pretrained(
+        model_args.model_name_or_path,
+        cache_dir=model_args.cache_dir,
+        use_auth_token=model_args.use_auth_token,
+    )
+    # endregion
+
+    # region Compute metric
+    rouge_score = evaluate.load("rouge")
+
+    def compute_metric(
+        tokenized_dataset=eval_dataset,
+        metric=rouge_score,
+        model=model,
+        batch_size=8,
+    ):
+        generation_data_collator = DataCollatorForSeq2Seq(
+            tokenizer=tokenizer,
+            model=model,
+            return_tensors="tf",
+            pad_to_multiple_of=256,
         )
+
+        tf_generate_dataset = model.prepare_tf_dataset(
+            tokenized_dataset,
+            collate_fn=generation_data_collator,
+            shuffle=False,
+            batch_size=batch_size,
+            drop_remainder=True,
+        )
+
+        @tf.function(jit_compile=True)
+        def generate_with_xla(batch):
+            return model.generate(
+                input_ids=batch["input_ids"],
+                attention_mask=batch["attention_mask"],
+                max_new_tokens=32,
+            )
+
+        all_preds = []
+        all_labels = []
+        for batch, labels in tqdm(tf_generate_dataset):
+            predictions = generate_with_xla(batch)
+            decoded_preds = tokenizer.batch_decode(
+                predictions, skip_special_tokens=True
+            )
+            labels = labels.numpy()
+            labels = np.where(labels != -100, labels, tokenizer.pad_token_id)
+            decoded_labels = tokenizer.batch_decode(
+                labels,
+                skip_special_tokens=True,
+                clean_up_tokenization_spaces=True,
+            )
+            decoded_preds, decoded_labels = postprocess_text(
+                decoded_preds, decoded_labels
+            )
+            all_preds.extend(decoded_preds)
+            all_labels.extend(decoded_labels)
+
+        return metric.compute(
+            predictions=all_preds, references=all_labels, use_stemmer=True
+        )
+
         # endregion
 
+    with training_args.strategy.scope():
         # region Prepare TF datasets
         label_pad_token_id = (
             -100 if data_args.ignore_pad_token_for_loss else tokenizer.pad_token_id
@@ -235,7 +288,7 @@ def main():
 
         dataset_options = tf.data.Options()
         dataset_options.experimental_distribute.auto_shard_policy = (
-            tf.data.experimental.AutoShardPolicy.OFF
+            tf.data.experimental.AutoShardPolicy.AUTO
         )
 
         num_replicas = training_args.strategy.num_replicas_in_sync
@@ -257,64 +310,6 @@ def main():
             batch_size=total_eval_batch_size,
             shuffle=False,
         ).with_options(dataset_options)
-        # endregion
-
-        # region Compute metric
-        rouge_score = evaluate.load("rouge")
-
-        def compute_metric(
-            tokenized_dataset=eval_dataset,
-            metric=rouge_score,
-            model=model,
-            batch_size=8,
-        ):
-            generation_data_collator = DataCollatorForSeq2Seq(
-                tokenizer=tokenizer,
-                model=model,
-                return_tensors="tf",
-                pad_to_multiple_of=256,
-            )
-
-            tf_generate_dataset = model.prepare_tf_dataset(
-                tokenized_dataset,
-                collate_fn=generation_data_collator,
-                shuffle=False,
-                batch_size=batch_size,
-                drop_remainder=True,
-            )
-
-            @tf.function(jit_compile=True)
-            def generate_with_xla(batch):
-                return model.generate(
-                    input_ids=batch["input_ids"],
-                    attention_mask=batch["attention_mask"],
-                    max_new_tokens=32,
-                )
-
-            all_preds = []
-            all_labels = []
-            for batch, labels in tqdm(tf_generate_dataset):
-                predictions = generate_with_xla(batch)
-                decoded_preds = tokenizer.batch_decode(
-                    predictions, skip_special_tokens=True
-                )
-                labels = labels.numpy()
-                labels = np.where(labels != -100, labels, tokenizer.pad_token_id)
-                decoded_labels = tokenizer.batch_decode(
-                    labels,
-                    skip_special_tokens=True,
-                    clean_up_tokenization_spaces=True,
-                )
-                decoded_preds, decoded_labels = postprocess_text(
-                    decoded_preds, decoded_labels
-                )
-                all_preds.extend(decoded_preds)
-                all_labels.extend(decoded_labels)
-
-            return metric.compute(
-                predictions=all_preds, references=all_labels, use_stemmer=True
-            )
-
         # endregion
 
         # region Optimizer, loss and LR scheduling
@@ -339,7 +334,7 @@ def main():
         # endregion
 
         # region Training
-        model.compile(optimizer=optimizer, jit_compile=training_args.xla, metrics=["accuracy"])
+        model.compile(optimizer=optimizer, jit_compile=training_args.xla)
 
         if training_args.fp16:
             tf.keras.mixed_precision.set_global_policy("mixed_float16")
@@ -360,18 +355,29 @@ def main():
                 "XLA training may be slow at first when --pad_to_max_length is not set "
                 "until all possible shapes have been compiled."
             )
-        
+
         callbacks.append(
-            tf.keras.callbacks.EarlyStopping(monitor="val_loss", patience=5, restore_best_weights=True)
+            tf.keras.callbacks.EarlyStopping(
+                monitor="val_loss", patience=5, restore_best_weights=True
+            )
         )
 
         history = model.fit(
             tf_train_dataset,
             validation_data=tf_eval_dataset,
             epochs=int(training_args.num_train_epochs),
-            callbacks=callbacks
+            callbacks=callbacks,
         )
-        eval_metrics = {key: val[-1] for key, val in history.history.items()}
+
+        train_metrics = {key: val[-1] for key, val in history.history.items()}
+        train_result = {key: val for key, val in train_metrics.items()}
+        logger.info(train_result)
+
+        output_result_file = os.path.join(training_args.output_dir, "all_results.json")
+        with open(output_result_file, "a") as writer:
+            writer.write("Train -> ")
+            writer.write(json.dumps(train_metrics))
+            writer.write("\n")
         # endregion
 
         # region Evaluation
@@ -380,45 +386,48 @@ def main():
 
             eval_metrics = compute_metric()
 
-            result = {key: round(val * 100, 4) for key, val in eval_metrics.items()}
-            logger.info(result)
-        # endregion
+            eval_result = {
+                key: round(val * 100, 4) for key, val in eval_metrics.items()
+            }
+            logger.info(eval_result)
 
         if eval_metrics is not None:
-            output_eval_file = os.path.join(
-                training_args.output_dir, "all_results.json"
-            )
-            with open(output_eval_file, "w") as writer:
+            with open(output_result_file, "a") as writer:
+                writer.write("Evaluation -> ")
                 writer.write(json.dumps(eval_metrics))
-
-        # region Push to hub
-
-        if training_args.push_to_hub and training_args.push_to_hub_token is not None:
-            push_to_hub_model_id = training_args.push_to_hub_model_id
-            model_name = model_args.model_name_or_path.split("/")[-1]
-            if not push_to_hub_model_id:
-                if data_args.dataset_name is not None:
-                    push_to_hub_model_id = (
-                        f"{model_name}-finetuned-{data_args.dataset_name}"
-                    )
-                else:
-                    push_to_hub_model_id = f"{model_name}-finetuned-summarization"
-
-            model.push_to_hub(
-                push_to_hub_model_id, use_auth_token=training_args.push_to_hub_token
-            )
-            tokenizer.push_to_hub(
-                push_to_hub_model_id, use_auth_token=training_args.push_to_hub_token
-            )
-
+                writer.write("\n")
         # endregion
 
-        if training_args.save_local:
-            model.save_pretrained(training_args.output_dir)
-            tokenizer.save_pretrained(training_args.output_dir)
+    # Training is done. Save the model.
 
-        if data_args.wandb_track:
-            wandb.finish()
+    # region Push to hub
+
+    if training_args.push_to_hub and training_args.push_to_hub_token is not None:
+        push_to_hub_model_id = training_args.push_to_hub_model_id
+        model_name = model_args.model_name_or_path.split("/")[-1]
+        if not push_to_hub_model_id:
+            if data_args.dataset_name is not None:
+                push_to_hub_model_id = (
+                    f"{model_name}-finetuned-{data_args.dataset_name.split('/')[-1]}"
+                )
+            else:
+                push_to_hub_model_id = f"{model_name}-finetuned-summarization"
+
+        model.push_to_hub(
+            push_to_hub_model_id, use_auth_token=training_args.push_to_hub_token
+        )
+        tokenizer.push_to_hub(
+            push_to_hub_model_id, use_auth_token=training_args.push_to_hub_token
+        )
+
+    # endregion
+
+    if training_args.save_local:
+        model.save_pretrained(training_args.output_dir)
+        tokenizer.save_pretrained(training_args.output_dir)
+
+    if data_args.wandb_track:
+        wandb.finish()
 
 
 if __name__ == "__main__":
