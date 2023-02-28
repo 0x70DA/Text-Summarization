@@ -207,21 +207,13 @@ def main():
 
     # endregion
 
-    # region Load model
-    model = TFAutoModelForSeq2SeqLM.from_pretrained(
-        model_args.model_name_or_path,
-        cache_dir=model_args.cache_dir,
-        use_auth_token=model_args.use_auth_token,
-    )
-    # endregion
-
     # region Compute metric
     rouge_score = evaluate.load("rouge")
 
     def compute_metric(
+        model,
         tokenized_dataset=eval_dataset,
         metric=rouge_score,
-        model=model,
         batch_size=8,
     ):
         generation_data_collator = DataCollatorForSeq2Seq(
@@ -274,6 +266,14 @@ def main():
         # endregion
 
     with training_args.strategy.scope():
+        # region Load model
+        model = TFAutoModelForSeq2SeqLM.from_pretrained(
+            model_args.model_name_or_path,
+            cache_dir=model_args.cache_dir,
+            use_auth_token=model_args.use_auth_token,
+        )
+        # endregion
+
         # region Prepare TF datasets
         label_pad_token_id = (
             -100 if data_args.ignore_pad_token_for_loss else tokenizer.pad_token_id
@@ -373,18 +373,16 @@ def main():
         train_result = {key: val for key, val in train_metrics.items()}
         logger.info(train_result)
 
-        output_result_file = os.path.join(training_args.output_dir, "all_results.json")
-        with open(output_result_file, "a") as writer:
-            writer.write("Train -> ")
+        train_result_file = os.path.join(training_args.output_dir, "train_results.json")
+        with open(train_result_file, "w") as writer:
             writer.write(json.dumps(train_metrics))
-            writer.write("\n")
         # endregion
 
         # region Evaluation
         if training_args.do_eval:
             logger.info("Evaluation...")
 
-            eval_metrics = compute_metric()
+            eval_metrics = compute_metric(model)
 
             eval_result = {
                 key: round(val * 100, 4) for key, val in eval_metrics.items()
@@ -392,10 +390,11 @@ def main():
             logger.info(eval_result)
 
         if eval_metrics is not None:
-            with open(output_result_file, "a") as writer:
-                writer.write("Evaluation -> ")
+            eval_result_file = os.path.join(
+                training_args.output_dir, "eval_results.json"
+            )
+            with open(eval_result_file, "w") as writer:
                 writer.write(json.dumps(eval_metrics))
-                writer.write("\n")
         # endregion
 
     # Training is done. Save the model.
