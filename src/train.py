@@ -220,7 +220,6 @@ def main():
             tokenizer=tokenizer,
             model=model,
             return_tensors="tf",
-            pad_to_multiple_of=256,
         )
 
         tf_generate_dataset = model.prepare_tf_dataset(
@@ -236,7 +235,7 @@ def main():
             return model.generate(
                 input_ids=batch["input_ids"],
                 attention_mask=batch["attention_mask"],
-                max_new_tokens=32,
+                max_new_tokens=128,
             )
 
         all_preds = []
@@ -282,7 +281,6 @@ def main():
             tokenizer,
             model=model,
             label_pad_token_id=label_pad_token_id,
-            pad_to_multiple_of=data_args.pad_to_multiple_of,  # Reduce the number of unique shapes for XLA, especially for generation
             return_tensors="tf",
         )
 
